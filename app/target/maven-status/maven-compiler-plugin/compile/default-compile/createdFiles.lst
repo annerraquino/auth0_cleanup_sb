@@ -1,0 +1,9 @@
+com\example\auth0cleanupsb\config\AppProperties$S3.class
+com\example\auth0cleanupsb\s3\S3CsvWriter.class
+com\example\auth0cleanupsb\Auth0CleanupSbApplication.class
+com\example\auth0cleanupsb\web\UserController.class
+com\example\auth0cleanupsb\config\AppProperties$Auth0.class
+com\example\auth0cleanupsb\auth0\Auth0Client.class
+com\example\auth0cleanupsb\config\AppProperties.class
+com\example\auth0cleanupsb\config\ParameterStoreLoader.class
+com\example\auth0cleanupsb\service\CleanupService.class

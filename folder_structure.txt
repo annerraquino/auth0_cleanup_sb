@@ -1,0 +1,45 @@
+auth0_cleanup_sb/
+├─ app/
+│  ├─ pom.xml
+│  ├─ Dockerfile
+│  ├─ .dockerignore                 # optional (see below)
+│  └─ src/
+│     └─ main/
+│        ├─ java/
+│        │  └─ com/
+│        │     └─ example/
+│        │        └─ auth0cleanupsb/
+│        │           ├─ Auth0CleanupSbApplication.java
+│        │           ├─ config/
+│        │           │  ├─ AppProperties.java
+│        │           │  └─ ParameterStoreLoader.java
+│        │           ├─ auth0/
+│        │           │  └─ Auth0Client.java
+│        │           ├─ s3/
+│        │           │  └─ S3CsvWriter.java
+│        │           ├─ service/
+│        │           │  └─ CleanupService.java
+│        │           └─ web/
+│        │              └─ UserController.java
+│        └─ resources/
+│           └─ application.yml
+│
+├─ infra/
+│  └─ terraform/                    # your terraform stuff (envs/modules/workflows)
+└─ .github/
+   └─ workflows/                    # build.yml, deploy.yml
+
+
+
+
+******************************
+modified 
+1. pom.xml
+2. application.yml
+3. Auth0CleanupApplication.java 
+4. AppProperties.java
+5. ParameterStoreLoader.java
+6. Auth0Client.java
+7. S3CsvWriter.java
+8. CleanupService.java
+9. UserController.java
