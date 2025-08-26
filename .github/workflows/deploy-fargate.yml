@@ -1,0 +1,60 @@
+﻿name: Deploy to Fargate
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO: auth0-cleanup-sb
+  ENV_DIR: infra/terraform/envs/dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+
+      # Build JAR & Docker image from ./app
+      - run: mvn -q -f app/pom.xml -DskipTests clean package
+      - run: docker build -t $ECR_REPO:${{ github.sha }} ./app
+
+      # OIDC → AWS
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Push to ECR (create repo if missing)
+      - name: Push image
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPO || aws ecr create-repository --repository-name $ECR_REPO
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          ECR="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+          aws ecr get-login-password | docker login --username AWS --password-stdin $ECR
+          IMAGE_URI="$ECR/$ECR_REPO:${{ github.sha }}"
+          docker tag $ECR_REPO:${{ github.sha }} $IMAGE_URI
+          docker push $IMAGE_URI
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      # Terraform
+      - uses: hashicorp/setup-terraform@v3
+
+      - run: terraform -chdir=${{ env.ENV_DIR }} init -input=false
+
+      - name: Apply
+        run: |
+          terraform -chdir=${{ env.ENV_DIR }} apply -auto-approve \
+            -var "image_uri=${{ env.IMAGE_URI }}" \
+            -var "ecr_repo_name=${{ env.ECR_REPO }}" \
+            -var "service_name=auth0-cleanup-sb" \
+            -var "param_prefix=/auth0-cleanup-sb/" \
+            -var "csv_bucket=auth0-deleted-users"
