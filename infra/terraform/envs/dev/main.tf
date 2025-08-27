@@ -1,7 +1,7 @@
 ############################################
 # ECS Fargate + ALB + VPC (public subnets)
 # Uses a stable random suffix to avoid name collisions
-# ECR creation is optional to avoid "RepositoryAlreadyExists" errors
+# ECR creation is optional to avoid RepositoryAlreadyExists
 ############################################
 
 # Stable random suffix (changes only if service_name changes)
@@ -13,8 +13,15 @@ resource "random_id" "suffix" {
 }
 
 locals {
-  suffix  = random_id.suffix.hex
-  resname = "${var.service_name}-${local.suffix}"
+  suffix       = random_id.suffix.hex
+  resname      = "${var.service_name}-${local.suffix}"
+
+  # Safe repo URL selection:
+  # - Use splats to produce [] even when count=0
+  # - one([]) works only on the chosen branch, so no invalid indexing
+  ecr_repo_url = var.manage_ecr_repo
+    ? one(aws_ecr_repository.repo[*].repository_url)
+    : one(data.aws_ecr_repository.repo[*].repository_url)
 }
 
 # Who am I (for ARNs)
@@ -193,10 +200,6 @@ resource "aws_lb_listener" "http" {
 # -------------------------
 # ECR: optional creation, otherwise read existing
 # -------------------------
-# If the repository ALREADY exists (created by your workflow), leave manage_ecr_repo=false.
-# Terraform will just read it via the data source below.
-# If you WANT Terraform to create/manage it, set manage_ecr_repo=true and ensure the name isn't already taken.
-
 resource "aws_ecr_repository" "repo" {
   count = var.manage_ecr_repo ? 1 : 0
 
@@ -216,13 +219,6 @@ resource "aws_ecr_repository" "repo" {
 data "aws_ecr_repository" "repo" {
   count = var.manage_ecr_repo ? 0 : 1
   name  = var.ecr_repo_name
-}
-
-# Choose a repo URL for outputs if you need it
-locals {
-  ecr_repo_url = var.manage_ecr_repo ?
-    aws_ecr_repository.repo[0].repository_url :
-    data.aws_ecr_repository.repo[0].repository_url
 }
 
 # -------------------------

@@ -69,3 +69,9 @@ variable "desired_count" {
   type        = number
   default     = 1
 }
+
+variable "manage_ecr_repo" {
+  description = "If true, Terraform creates/manages the ECR repo; if false, it reads an existing repo."
+  type        = bool
+  default     = false
+}
