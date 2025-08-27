@@ -154,4 +154,251 @@ resource "aws_lb" "app" {
   }
 }
 
-resource "aw
+resource "aws_lb_target_group" "app" {
+  name        = "${local.resname}-tg"
+  port        = var.container_port
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.this.id
+  target_type = "ip"
+
+  health_check {
+    path                = "/actuator/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    interval            = 30
+    timeout             = 5
+    matcher             = "200-399"
+  }
+
+  tags = {
+    Name = "${local.resname}-tg"
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.app.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+}
+
+# -------------------------
+# ECR: optional creation, otherwise read existing
+# -------------------------
+# If the repository ALREADY exists (created by your workflow), leave manage_ecr_repo=false.
+# Terraform will just read it via the data source below.
+# If you WANT Terraform to create/manage it, set manage_ecr_repo=true and ensure the name isn't already taken.
+
+resource "aws_ecr_repository" "repo" {
+  count = var.manage_ecr_repo ? 1 : 0
+
+  name = var.ecr_repo_name
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  force_delete = true
+
+  tags = {
+    Name = var.ecr_repo_name
+  }
+}
+
+data "aws_ecr_repository" "repo" {
+  count = var.manage_ecr_repo ? 0 : 1
+  name  = var.ecr_repo_name
+}
+
+# Choose a repo URL for outputs if you need it
+locals {
+  ecr_repo_url = var.manage_ecr_repo ?
+    aws_ecr_repository.repo[0].repository_url :
+    data.aws_ecr_repository.repo[0].repository_url
+}
+
+# -------------------------
+# IAM Roles & Policies
+# -------------------------
+data "aws_iam_policy_document" "task_exec_trust" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role" "task_execution" {
+  name               = "${local.resname}-task-exec"
+  assume_role_policy = data.aws_iam_policy_document.task_exec_trust.json
+
+  tags = {
+    Name = "${local.resname}-task-exec"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "task_exec_policy" {
+  role       = aws_iam_role.task_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role" "task_role" {
+  name               = "${local.resname}-task-role"
+  assume_role_policy = data.aws_iam_policy_document.task_exec_trust.json
+
+  tags = {
+    Name = "${local.resname}-task-role"
+  }
+}
+
+resource "aws_iam_policy" "task_permissions" {
+  name = "${local.resname}-task-perms"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "ReadParams",
+        Effect = "Allow",
+        Action = [
+          "ssm:GetParameters",
+          "ssm:GetParameter",
+          "ssm:GetParametersByPath"
+        ],
+        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.me.account_id}:parameter${var.param_prefix}*"
+      },
+      {
+        Sid    = "DecryptIfSecure",
+        Effect = "Allow",
+        Action = [
+          "kms:Decrypt"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid    = "S3WriteCsv",
+        Effect = "Allow",
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:AbortMultipartUpload"
+        ],
+        Resource = [
+          "arn:aws:s3:::${var.csv_bucket}",
+          "arn:aws:s3:::${var.csv_bucket}/*"
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "task_role_attach" {
+  role       = aws_iam_role.task_role.name
+  policy_arn = aws_iam_policy.task_permissions.arn
+}
+
+# -------------------------
+# CloudWatch Logs
+# -------------------------
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${local.resname}"
+  retention_in_days = 14
+
+  tags = {
+    Name = "/ecs/${local.resname}"
+  }
+}
+
+# -------------------------
+# ECS Cluster, Task & Service
+# -------------------------
+resource "aws_ecs_cluster" "this" {
+  name = "${local.resname}-cluster"
+
+  tags = {
+    Name = "${local.resname}-cluster"
+  }
+}
+
+resource "aws_ecs_task_definition" "app" {
+  family                   = local.resname
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = tostring(var.cpu)
+  memory                   = tostring(var.memory)
+  network_mode             = "awsvpc"
+  execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "app",
+      image     = var.image_uri,
+      essential = true,
+      portMappings = [
+        {
+          containerPort = var.container_port,
+          hostPort      = var.container_port,
+          protocol      = "tcp"
+        }
+      ],
+      environment = [
+        { name = "APP_PARAM_PREFIX", value = var.param_prefix },
+        { name = "APP_S3_BUCKET",    value = var.csv_bucket },
+        { name = "APP_S3_KEY",       value = var.csv_key }
+      ],
+      logConfiguration = {
+        logDriver = "awslogs",
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.app.name,
+          awslogs-region        = var.aws_region,
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = local.resname
+  }
+}
+
+resource "aws_ecs_service" "app" {
+  name            = var.service_name
+  cluster         = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+    security_groups  = [aws_security_group.task.id]
+    assign_public_ip = true
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.app.arn
+    container_name   = "app"
+    container_port   = var.container_port
+  }
+
+  depends_on = [
+    aws_lb_listener.http
+  ]
+
+  tags = {
+    Name = var.service_name
+  }
+}
