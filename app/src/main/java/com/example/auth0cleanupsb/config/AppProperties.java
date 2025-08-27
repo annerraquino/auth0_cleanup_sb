@@ -6,7 +6,7 @@ import org.springframework.stereotype.Component;
 @Component
 @ConfigurationProperties(prefix = "app")
 public class AppProperties {
-  private String paramPrefix = "/auth0-cleanup/";
+  private String paramPrefix = "/auth0-cleanup-sb/";
   public static class S3 {
     private String bucket;
     private String key = "output/deleted_users.csv";
