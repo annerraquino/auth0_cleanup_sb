@@ -1,11 +1,22 @@
 ############################################
 # ECS Fargate + ALB + VPC (public subnets)
-# Variables expected (see variables.tf):
-# - aws_region, service_name, ecr_repo_name, image_uri, cpu, memory, container_port
-# - param_prefix, csv_bucket, csv_key, desired_count
 ############################################
 
-# --- Caller identity (for ARNs) ---
+# Random suffix to make names unique but stable per service_name
+# Change service_name to get a new suffix; otherwise it stays constant.
+resource "random_id" "suffix" {
+  byte_length = 2
+  keepers = {
+    service_name = var.service_name
+  }
+}
+
+locals {
+  suffix   = random_id.suffix.hex
+  resname  = "${var.service_name}-${local.suffix}"
+}
+
+# Who am I (for ARNs)
 data "aws_caller_identity" "me" {}
 
 # --- VPC (2 public subnets + IGW) ---
@@ -13,18 +24,12 @@ resource "aws_vpc" "this" {
   cidr_block           = "10.42.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
-
-  tags = {
-    Name = "${var.service_name}-vpc"
-  }
+  tags = { Name = "${local.resname}-vpc" }
 }
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.this.id
-
-  tags = {
-    Name = "${var.service_name}-igw"
-  }
+  tags   = { Name = "${local.resname}-igw" }
 }
 
 resource "aws_subnet" "public_a" {
@@ -32,10 +37,7 @@ resource "aws_subnet" "public_a" {
   cidr_block              = "10.42.0.0/24"
   availability_zone       = "${var.aws_region}a"
   map_public_ip_on_launch = true
-
-  tags = {
-    Name = "${var.service_name}-pub-a"
-  }
+  tags = { Name = "${local.resname}-pub-a" }
 }
 
 resource "aws_subnet" "public_b" {
@@ -43,10 +45,7 @@ resource "aws_subnet" "public_b" {
   cidr_block              = "10.42.1.0/24"
   availability_zone       = "${var.aws_region}b"
   map_public_ip_on_launch = true
-
-  tags = {
-    Name = "${var.service_name}-pub-b"
-  }
+  tags = { Name = "${local.resname}-pub-b" }
 }
 
 resource "aws_route_table" "public" {
@@ -57,9 +56,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.igw.id
   }
 
-  tags = {
-    Name = "${var.service_name}-rtb-public"
-  }
+  tags = { Name = "${local.resname}-rtb-public" }
 }
 
 resource "aws_route_table_association" "a" {
@@ -74,7 +71,7 @@ resource "aws_route_table_association" "b" {
 
 # --- Security Groups ---
 resource "aws_security_group" "alb" {
-  name   = "${var.service_name}-alb-sg"
+  name   = "${local.resname}-alb-sg"
   vpc_id = aws_vpc.this.id
 
   ingress {
@@ -91,13 +88,11 @@ resource "aws_security_group" "alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "${var.service_name}-alb-sg"
-  }
+  tags = { Name = "${local.resname}-alb-sg" }
 }
 
 resource "aws_security_group" "task" {
-  name   = "${var.service_name}-task-sg"
+  name   = "${local.resname}-task-sg"
   vpc_id = aws_vpc.this.id
 
   ingress {
@@ -114,26 +109,25 @@ resource "aws_security_group" "task" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "${var.service_name}-task-sg"
-  }
+  tags = { Name = "${local.resname}-task-sg" }
 }
 
 # --- ALB + Listener + Target Group ---
 resource "aws_lb" "app" {
-  name               = "${var.service_name}-alb"
+  name               = "${local.resname}-alb"     # unique
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+  tags               = { Name = "${local.resname}-alb" }
 
-  tags = {
-    Name = "${var.service_name}-alb"
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = "${var.service_name}-tg"
+  name        = "${local.resname}-tg"             # unique
   port        = var.container_port
   protocol    = "HTTP"
   vpc_id      = aws_vpc.this.id
@@ -148,8 +142,10 @@ resource "aws_lb_target_group" "app" {
     matcher             = "200-399"
   }
 
-  tags = {
-    Name = "${var.service_name}-tg"
+  tags = { Name = "${local.resname}-tg" }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -164,7 +160,10 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# --- ECR repository (for images) ---
+# --- ECR repository (optional: manage here) ---
+# If your workflow already creates the repo, either:
+# - keep this and import the existing repo, or
+# - remove this resource and use a data source instead.
 resource "aws_ecr_repository" "repo" {
   name = var.ecr_repo_name
 
@@ -173,33 +172,22 @@ resource "aws_ecr_repository" "repo" {
   }
 
   force_delete = true
-
-  tags = {
-    Name = var.ecr_repo_name
-  }
+  tags         = { Name = var.ecr_repo_name }
 }
 
-# --- IAM: task execution role (pull image, push logs) ---
+# --- IAM: task execution role ---
 data "aws_iam_policy_document" "task_exec_trust" {
   statement {
     effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-
+    principals { type = "Service", identifiers = ["ecs-tasks.amazonaws.com"] }
     actions = ["sts:AssumeRole"]
   }
 }
 
 resource "aws_iam_role" "task_execution" {
-  name               = "${var.service_name}-task-exec"
+  name               = "${local.resname}-task-exec"
   assume_role_policy = data.aws_iam_policy_document.task_exec_trust.json
-
-  tags = {
-    Name = "${var.service_name}-task-exec"
-  }
+  tags               = { Name = "${local.resname}-task-exec" }
 }
 
 resource "aws_iam_role_policy_attachment" "task_exec_policy" {
@@ -207,18 +195,15 @@ resource "aws_iam_role_policy_attachment" "task_exec_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# --- IAM: task role (app permissions: SSM, S3, optional KMS) ---
+# --- IAM: task role (app permissions) ---
 resource "aws_iam_role" "task_role" {
-  name               = "${var.service_name}-task-role"
+  name               = "${local.resname}-task-role"
   assume_role_policy = data.aws_iam_policy_document.task_exec_trust.json
-
-  tags = {
-    Name = "${var.service_name}-task-role"
-  }
+  tags               = { Name = "${local.resname}-task-role" }
 }
 
 resource "aws_iam_policy" "task_permissions" {
-  name = "${var.service_name}-task-perms"
+  name = "${local.resname}-task-perms"
 
   policy = jsonencode({
     Version = "2012-10-17",
@@ -226,29 +211,19 @@ resource "aws_iam_policy" "task_permissions" {
       {
         Sid    = "ReadParams",
         Effect = "Allow",
-        Action = [
-          "ssm:GetParameters",
-          "ssm:GetParameter",
-          "ssm:GetParametersByPath"
-        ],
+        Action = ["ssm:GetParameters","ssm:GetParameter","ssm:GetParametersByPath"],
         Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.me.account_id}:parameter${var.param_prefix}*"
       },
       {
         Sid    = "DecryptIfSecure",
         Effect = "Allow",
-        Action = [
-          "kms:Decrypt"
-        ],
+        Action = ["kms:Decrypt"],
         Resource = "*"
       },
       {
         Sid    = "S3WriteCsv",
         Effect = "Allow",
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:AbortMultipartUpload"
-        ],
+        Action = ["s3:GetObject","s3:PutObject","s3:AbortMultipartUpload"],
         Resource = [
           "arn:aws:s3:::${var.csv_bucket}",
           "arn:aws:s3:::${var.csv_bucket}/*"
@@ -265,25 +240,19 @@ resource "aws_iam_role_policy_attachment" "task_role_attach" {
 
 # --- CloudWatch Logs ---
 resource "aws_cloudwatch_log_group" "app" {
-  name              = "/ecs/${var.service_name}"
+  name              = "/ecs/${local.resname}"  # unique
   retention_in_days = 14
-
-  tags = {
-    Name = "/ecs/${var.service_name}"
-  }
+  tags              = { Name = "/ecs/${local.resname}" }
 }
 
 # --- ECS ---
 resource "aws_ecs_cluster" "this" {
-  name = "${var.service_name}-cluster"
-
-  tags = {
-    Name = "${var.service_name}-cluster"
-  }
+  name = "${local.resname}-cluster"
+  tags = { Name = "${local.resname}-cluster" }
 }
 
 resource "aws_ecs_task_definition" "app" {
-  family                   = var.service_name
+  family                   = "${local.resname}"
   requires_compatibilities = ["FARGATE"]
   cpu                      = tostring(var.cpu)
   memory                   = tostring(var.memory)
@@ -294,60 +263,4 @@ resource "aws_ecs_task_definition" "app" {
   container_definitions = jsonencode([
     {
       name      = "app",
-      image     = var.image_uri,
-      essential = true,
-      portMappings = [
-        {
-          containerPort = var.container_port,
-          hostPort      = var.container_port,
-          protocol      = "tcp"
-        }
-      ],
-      environment = [
-        { name = "APP_PARAM_PREFIX", value = var.param_prefix },
-        { name = "APP_S3_BUCKET",    value = var.csv_bucket },
-        { name = "APP_S3_KEY",       value = var.csv_key }
-      ],
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.app.name,
-          awslogs-region        = var.aws_region,
-          awslogs-stream-prefix = "ecs"
-        }
-      }
-    }
-  ])
-
-  tags = {
-    Name = var.service_name
-  }
-}
-
-resource "aws_ecs_service" "app" {
-  name            = var.service_name
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets          = [aws_subnet.public_a.id, aws_subnet.public_b.id]
-    security_groups  = [aws_security_group.task.id]
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.app.arn
-    container_name   = "app"
-    container_port   = var.container_port
-  }
-
-  depends_on = [
-    aws_lb_listener.http
-  ]
-
-  tags = {
-    Name = var.service_name
-  }
-}
+      imag
