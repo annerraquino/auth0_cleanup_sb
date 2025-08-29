@@ -11,50 +11,80 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+  # ECR repo name (no registry prefix)
   ECR_REPO: auth0-cleanup-sb
+  # Path to the Terraform env you’re applying (adjust if different)
   ENV_DIR: infra/terraform/envs/dev
+  # Optional: ECS service name override
+  SERVICE_NAME: auth0-cleanup-sb
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-fargate
+      cancel-in-progress: true
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-
-      # Build JAR & Docker image from ./app
-      - run: mvn -q -f app/pom.xml -DskipTests clean package
-      - run: docker build -t $ECR_REPO:${{ github.sha }} ./app
-
-      # OIDC → AWS
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}     # set in repo Settings → Variables
           aws-region: ${{ env.AWS_REGION }}
 
-      # Push to ECR (create repo if missing)
-      - name: Push image
+      - name: Set up Java (JDK 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Build JAR (skip tests)
+        working-directory: app
+        run: mvn -q -DskipTests clean package
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          aws ecr describe-repositories --repository-names $ECR_REPO || aws ecr create-repository --repository-name $ECR_REPO
-          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-          ECR="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
-          aws ecr get-login-password | docker login --username AWS --password-stdin $ECR
-          IMAGE_URI="$ECR/$ECR_REPO:${{ github.sha }}"
-          docker tag $ECR_REPO:${{ github.sha }} $IMAGE_URI
-          docker push $IMAGE_URI
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${GITHUB_SHA}"
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          docker build -t "$IMAGE_URI" ./app
+          docker push "$IMAGE_URI"
 
-      # Terraform
-      - uses: hashicorp/setup-terraform@v3
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.5
 
-      - run: terraform -chdir=${{ env.ENV_DIR }} init -input=false
+      - name: Terraform Init
+        run: terraform -chdir=${{ env.ENV_DIR }} init -input=false
 
-      - name: Apply
+      - name: Terraform Plan
+        env:
+          IMAGE_URI: ${{ env.IMAGE_URI }}
         run: |
-          terraform -chdir=${{ env.ENV_DIR }} apply -auto-approve \
-            -var "image_uri=${{ env.IMAGE_URI }}" \
-            -var "ecr_repo_name=${{ env.ECR_REPO }}" \
-            -var "service_name=auth0-cleanup-sb" \
-            -var "param_prefix=/auth0-cleanup-sb/" \
-            -var "csv_bucket=auth0-deleted-users"
+          terraform -chdir=${{ env.ENV_DIR }} plan -input=false \
+            -var="image_uri=${IMAGE_URI}" \
+            -var="ecr_repo_name=${{ env.ECR_REPO }}" \
+            -var="service_name=${{ env.SERVICE_NAME }}" \
+            -var="param_prefix=${{ vars.SSM_PARAM_PREFIX }}" \
+            -var="csv_bucket=${{ vars.S3_BUCKET }}"
+
+      - name: Terraform Apply
+        env:
+          IMAGE_URI: ${{ env.IMAGE_URI }}
+        run: |
+          terraform -chdir=${{ env.ENV_DIR }} apply -auto-approve -input=false \
+            -var="image_uri=${IMAGE_URI}" \
+            -var="ecr_repo_name=${{ env.ECR_REPO }}" \
+            -var="service_name=${{ env.SERVICE_NAME }}" \
+            -var="param_prefix=${{ vars.SSM_PARAM_PREFIX }}" \
+            -var="csv_bucket=${{ vars.S3_BUCKET }}"
