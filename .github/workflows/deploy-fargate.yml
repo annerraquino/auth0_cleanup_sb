@@ -32,7 +32,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.ROLE_TO_ASSUME }}     # set in repo Settings → Variables
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME  }}     # set in repo Settings → Variables
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Set up Java (JDK 21)
