@@ -1,8 +1,8 @@
-﻿name: Deploy to Fargate
+﻿name: Deploy Fargate
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -11,12 +11,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  # ECR repo name (no registry prefix)
-  ECR_REPO: auth0-cleanup-sb
-  # Path to the Terraform env you’re applying (adjust if different)
-  ENV_DIR: infra/terraform/envs/dev
-  # Optional: ECS service name override
-  SERVICE_NAME: auth0-cleanup-sb
+  ECR_REPOSITORY: auth0-cleanup-sb     # ECR repo name (no registry)
 
 jobs:
   build-and-deploy:
@@ -29,18 +24,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show role to assume
+        run: echo "AWS_ROLE_ARN=${{ secrets.AWS_ROLE_TO_ASSUME }}"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME  }}     # set in repo Settings → Variables
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions
 
       - name: Set up Java (JDK 21)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-          cache: 'maven'
+          cache: maven
 
       - name: Build JAR (skip tests)
         working-directory: app
@@ -50,14 +49,36 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build & Push image
+      - name: Build & Push Docker image
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${GITHUB_SHA}"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
           docker build -t "$IMAGE_URI" ./app
           docker push "$IMAGE_URI"
+
+      # ---- Auto-detect Terraform module directory ----
+      - name: Find Terraform module directory
+        id: tfdir
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Searching for Terraform configuration (main.tf) ..."
+          TF_DIR="$(find . -maxdepth 3 -type f -name 'main.tf' -printf '%h\n' | head -n1 || true)"
+          if [[ -z "${TF_DIR}" ]]; then
+            echo "ERROR: No main.tf found within depth 3. Check your repo layout." >&2
+            exit 1
+          fi
+          echo "Found Terraform directory: ${TF_DIR}"
+          echo "path=${TF_DIR}" >> "$GITHUB_OUTPUT"
+
+      - name: Debug TF dir contents
+        run: |
+          echo "TF DIR=${{ steps.tfdir.outputs.path }}"
+          ls -la "${{ steps.tfdir.outputs.path }}"
+          echo "---- All .tf files in TF DIR ----"
+          find "${{ steps.tfdir.outputs.path }}" -maxdepth 1 -type f -name "*.tf" -print
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -65,25 +86,22 @@ jobs:
           terraform_version: 1.8.5
 
       - name: Terraform Init
-        working-directory: infra
-        run: terraform init -input=false
+        run: terraform -chdir="${{ steps.tfdir.outputs.path }}" init -input=false
 
       - name: Terraform Plan
-        working-directory: infra
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          terraform plan -input=false \
+          terraform -chdir="${{ steps.tfdir.outputs.path }}" plan -input=false \
             -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
             -var="s3_bucket=${{ vars.S3_BUCKET }}" \
             -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
 
       - name: Terraform Apply
-        working-directory: infra
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          terraform apply -auto-approve -input=false \
+          terraform -chdir="${{ steps.tfdir.outputs.path }}" apply -auto-approve -input=false \
             -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
             -var="s3_bucket=${{ vars.S3_BUCKET }}" \
             -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
