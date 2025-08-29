@@ -65,29 +65,25 @@ jobs:
           terraform_version: 1.8.5
 
       - name: Terraform Init
-        run: terraform -chdir=${{ env.ENV_DIR }} init -input=false
+        working-directory: infra
+        run: terraform init -input=false
 
-        - name: Terraform Init
-          working-directory: infra
-          run: terraform init -input=false
+      - name: Terraform Plan
+        working-directory: infra
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          terraform plan -input=false \
+            -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
+            -var="s3_bucket=${{ vars.S3_BUCKET }}" \
+            -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
 
-        - name: Terraform Plan
-          working-directory: infra
-          env:
-            ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          run: |
-            terraform plan -input=false \
-              -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
-              -var="s3_bucket=${{ vars.S3_BUCKET }}" \
-              -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
-
-        - name: Terraform Apply
-          working-directory: infra
-          env:
-            ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          run: |
-            terraform apply -auto-approve -input=false \
-              -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
-              -var="s3_bucket=${{ vars.S3_BUCKET }}" \
-              -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
-
+      - name: Terraform Apply
+        working-directory: infra
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
+            -var="s3_bucket=${{ vars.S3_BUCKET }}" \
+            -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
