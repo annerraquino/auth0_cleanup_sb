@@ -11,7 +11,8 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: auth0-cleanup-sb     # ECR repo name (no registry)
+  ECR_REPOSITORY: auth0-cleanup-sb
+  TF_DIR: infra/terraform/envs/dev   # <— your folder with main.tf
 
 jobs:
   build-and-deploy:
@@ -24,13 +25,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show role to assume
-        run: echo "AWS_ROLE_ARN=${{ secrets.AWS_ROLE_TO_ASSUME }}"
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}   # set in repo Settings → Variables
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions
 
@@ -58,27 +56,12 @@ jobs:
           docker build -t "$IMAGE_URI" ./app
           docker push "$IMAGE_URI"
 
-      # ---- Auto-detect Terraform module directory ----
-      - name: Find Terraform module directory
-        id: tfdir
-        shell: bash
+      - name: Debug Terraform directory
         run: |
-          set -euo pipefail
-          echo "Searching for Terraform configuration (main.tf) ..."
-          TF_DIR="$(find . -maxdepth 3 -type f -name 'main.tf' -printf '%h\n' | head -n1 || true)"
-          if [[ -z "${TF_DIR}" ]]; then
-            echo "ERROR: No main.tf found within depth 3. Check your repo layout." >&2
-            exit 1
-          fi
-          echo "Found Terraform directory: ${TF_DIR}"
-          echo "path=${TF_DIR}" >> "$GITHUB_OUTPUT"
-
-      - name: Debug TF dir contents
-        run: |
-          echo "TF DIR=${{ steps.tfdir.outputs.path }}"
-          ls -la "${{ steps.tfdir.outputs.path }}"
-          echo "---- All .tf files in TF DIR ----"
-          find "${{ steps.tfdir.outputs.path }}" -maxdepth 1 -type f -name "*.tf" -print
+          echo "TF_DIR=${{ env.TF_DIR }}"
+          ls -la "${{ env.TF_DIR }}"
+          echo "---- .tf files ----"
+          find "${{ env.TF_DIR }}" -maxdepth 1 -type f -name "*.tf" -print
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -86,13 +69,13 @@ jobs:
           terraform_version: 1.8.5
 
       - name: Terraform Init
-        run: terraform -chdir="${{ steps.tfdir.outputs.path }}" init -input=false
+        run: terraform -chdir="${{ env.TF_DIR }}" init -input=false
 
       - name: Terraform Plan
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          terraform -chdir="${{ steps.tfdir.outputs.path }}" plan -input=false \
+          terraform -chdir="${{ env.TF_DIR }}" plan -input=false \
             -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
             -var="s3_bucket=${{ vars.S3_BUCKET }}" \
             -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
@@ -101,7 +84,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          terraform -chdir="${{ steps.tfdir.outputs.path }}" apply -auto-approve -input=false \
+          terraform -chdir="${{ env.TF_DIR }}" apply -auto-approve -input=false \
             -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
             -var="s3_bucket=${{ vars.S3_BUCKET }}" \
             -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
