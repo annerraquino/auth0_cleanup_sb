@@ -2,6 +2,11 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Unique 4-hex suffix for TG name to avoid name collisions
+resource "random_id" "tg" {
+  byte_length = 2
+}
+
 ########################################
 # Locals
 ########################################
@@ -131,7 +136,7 @@ resource "aws_lb" "app" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = "${local.name}-tg"
+  name        = "${local.name}-${random_id.tg.hex}-tg"  # was: "auth0-cleanup-sb-tg"
   port        = 8080
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
