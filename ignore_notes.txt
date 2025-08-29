@@ -1,3 +1,12 @@
+s3:
+ aws s3 cp users_to_delete.csv s3://auth0-deleted-users/input/users_to_delete.csv
+
+ aws s3 cp s3://auth0-deleted-users/input/users_to_delete.csv - | tail -n 10
+ aws s3 cp s3://auth0-deleted-users/output/deleted_users.csv - | tail -n 10
+-------------------------------------------------------------------------------- 
+ 
+
+
 mvn -q -DskipTests clean package
 
 
@@ -9,6 +18,21 @@ docker run --rm -p 8080:8080 `
   -e AWS_PROFILE=default -e AWS_SDK_LOAD_CONFIG=1 `
   -v "$HOME\.aws:/root/.aws:ro" `
   auth0-cleanup-sb:local
+
+Docker logs:
+docker logs -f $(docker ps -q --filter ancestor=auth0-cleanup-sb:local)
+
+trigger:
+curl -X POST "http://localhost:8080/batch/run?dryRun=true"
+curl -X POST "http://localhost:8080/batch/run"
+
+
+Check results:
+aws s3 cp s3://auth0-deleted-users/output/deleted_users.csv - | tail -n 20
+
+Running in ECS:
+curl -X POST "http://<your-alb-dns>/batch/run?dryRun=true"
+
 
 
 
@@ -40,9 +64,14 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8080/batch/run" | Format-L
 
 
 
-2025-08-29T17:40:07.272Z  INFO 1 --- [nio-8080-exec-1] c.e.a.batch.io.S3CsvUserReader           : Opening S3 CSV s3://auth0-deleted-users/input/users_to_delete.csv
-2025-08-29T17:40:07.643Z ERROR 1 --- [nio-8080-exec-1] o.s.batch.core.step.AbstractStep         : Encountered an error executing step deleteUsersStep in job deleteUsersJob
+----------------------
+AWS Post Deployment Run 
+----------------------
+Outputs:
 
-software.amazon.awssdk.core.exception.SdkClientException: Unable to marshall request to JSON: Bucket cannot be empty.
-        at software.amazon.awssdk.core.exception.SdkClientException$BuilderImpl.build(SdkClientException.java:111) ~[sdk-core-2.25.0.jar!/:na]
-        at software.amazon.awssdk.services.s3.transform.HeadObjectRequestMarshaller.marshall(HeadObjectRequestMarshaller.java:53) ~[s3-2.25.0.jar!/:na]
+alb_dns_name = "auth0-cleanup-sb-6b7b-alb-1550382282.us-east-1.elb.amazonaws.com"
+ecs_cluster_name = "auth0-cleanup-sb-6b7b-cluster"
+ecs_service_name = "auth0-cleanup-sb"
+
+curl -X POST "http://<ALB-DNS>/batch/run"
+curl -X POST "http://auth0-cleanup-sb-6b7b-alb-1550382282.us-east-1.elb.amazonaws.com/batch/run"

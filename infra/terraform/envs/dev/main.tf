@@ -1,69 +1,65 @@
-############################################
-# ECS Fargate + ALB + VPC (public subnets)
-# Stable random suffix (avoids name collisions)
-# ECR creation optional (avoid RepositoryAlreadyExists)
-############################################
-
-resource "random_id" "suffix" {
-  byte_length = 2
-  keepers = { service_name = var.service_name }
+terraform {
+  required_version = ">= 1.6.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
 }
 
+provider "aws" {
+  region = var.aws_region
+}
+
+########################################
+# Locals
+########################################
 locals {
-  suffix  = random_id.suffix.hex
-  resname = "${var.service_name}-${local.suffix}"
-
-  # Pick repo URL from the branch that exists:
-  # - If Terraform creates the repo (count=1), first one() succeeds.
-  # - If repo pre-exists (data, count=1), first one() errors on [], and try() falls back to data.
-  ecr_repo_url = try(
-    one(aws_ecr_repository.repo[*].repository_url),
-    one(data.aws_ecr_repository.repo[*].repository_url)
-  )
+  name = var.project_name
 }
 
-data "aws_caller_identity" "me" {}
-
-# -------------------------
-# Networking (VPC + Subnets)
-# -------------------------
-resource "aws_vpc" "this" {
-  cidr_block           = "10.42.0.0/16"
+########################################
+# VPC + Networking (2 public subnets)
+########################################
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = { Name = "${local.resname}-vpc" }
+
+  tags = { Name = "${local.name}-vpc" }
 }
 
 resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.this.id
-  tags   = { Name = "${local.resname}-igw" }
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${local.name}-igw" }
 }
 
 resource "aws_subnet" "public_a" {
-  vpc_id                  = aws_vpc.this.id
-  cidr_block              = "10.42.0.0/24"
-  availability_zone       = "${var.aws_region}a"
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[0]
   map_public_ip_on_launch = true
-  tags = { Name = "${local.resname}-pub-a" }
+  availability_zone       = "${var.aws_region}a"
+  tags = { Name = "${local.name}-public-a" }
 }
 
 resource "aws_subnet" "public_b" {
-  vpc_id                  = aws_vpc.this.id
-  cidr_block              = "10.42.1.0/24"
-  availability_zone       = "${var.aws_region}b"
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[1]
   map_public_ip_on_launch = true
-  tags = { Name = "${local.resname}-pub-b" }
+  availability_zone       = "${var.aws_region}b"
+  tags = { Name = "${local.name}-public-b" }
 }
 
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.this.id
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${local.name}-public-rt" }
+}
 
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
-  }
-
-  tags = { Name = "${local.resname}-rtb-public" }
+resource "aws_route" "public_default" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.igw.id
 }
 
 resource "aws_route_table_association" "a" {
@@ -76,18 +72,22 @@ resource "aws_route_table_association" "b" {
   route_table_id = aws_route_table.public.id
 }
 
-# -------------------------
+########################################
 # Security Groups
-# -------------------------
+########################################
+# ALB: allow HTTP from anywhere
 resource "aws_security_group" "alb" {
-  name   = "${local.resname}-alb-sg"
-  vpc_id = aws_vpc.this.id
+  name        = "${local.name}-alb-sg"
+  description = "ALB security group"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
+    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
   egress {
@@ -95,18 +95,22 @@ resource "aws_security_group" "alb" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
-  tags = { Name = "${local.resname}-alb-sg" }
+  tags = { Name = "${local.name}-alb-sg" }
 }
 
-resource "aws_security_group" "task" {
-  name   = "${local.resname}-task-sg"
-  vpc_id = aws_vpc.this.id
+# ECS service: allow 8080 from ALB only
+resource "aws_security_group" "ecs_service" {
+  name        = "${local.name}-svc-sg"
+  description = "ECS service security group"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port       = var.container_port
-    to_port         = var.container_port
+    description     = "From ALB"
+    from_port       = 8080
+    to_port         = 8080
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
@@ -116,43 +120,46 @@ resource "aws_security_group" "task" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
-  tags = { Name = "${local.resname}-task-sg" }
+  tags = { Name = "${local.name}-svc-sg" }
 }
 
-# -------------------------
+########################################
 # ALB + Target Group + Listener
-# -------------------------
+########################################
 resource "aws_lb" "app" {
-  name               = "${local.resname}-alb"
+  name               = "${local.name}-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
-  tags               = { Name = "${local.resname}-alb" }
+  enable_deletion_protection = false
 
-  lifecycle { create_before_destroy = true }
+  tags = { Name = "${local.name}-alb" }
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = "${local.resname}-tg"
-  port        = var.container_port
+  name        = "${local.name}-tg"
+  port        = 8080
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.this.id
+  vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
   health_check {
-    path                = "/actuator/health"
+    enabled             = true
     healthy_threshold   = 2
-    unhealthy_threshold = 2
+    unhealthy_threshold = 5
     interval            = 30
     timeout             = 5
-    matcher             = "200-399"
+    matcher             = "200-499"
+    path                = var.health_check_path
+    port                = "traffic-port"
+    protocol            = "HTTP"
   }
 
-  tags = { Name = "${local.resname}-tg" }
-  lifecycle { create_before_destroy = true }
+  tags = { Name = "${local.name}-tg" }
 }
 
 resource "aws_lb_listener" "http" {
@@ -166,147 +173,148 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# -------------------------
-# ECR: optional creation, or read existing
-# -------------------------
-resource "aws_ecr_repository" "repo" {
-  count = var.manage_ecr_repo ? 1 : 0
-  name  = var.ecr_repo_name
-
-  image_scanning_configuration { scan_on_push = true }
-  force_delete = true
-  tags         = { Name = var.ecr_repo_name }
+########################################
+# CloudWatch Logs for ECS
+########################################
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${local.name}"
+  retention_in_days = 14
 }
 
-data "aws_ecr_repository" "repo" {
-  count = var.manage_ecr_repo ? 0 : 1
-  name  = var.ecr_repo_name
-}
-
-# -------------------------
-# IAM Roles & Policies
-# -------------------------
-data "aws_iam_policy_document" "task_exec_trust" {
-  statement {
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-
-    actions = ["sts:AssumeRole"]
-  }
-}
-
-resource "aws_iam_role" "task_execution" {
-  name               = "${local.resname}-task-exec"
-  assume_role_policy = data.aws_iam_policy_document.task_exec_trust.json
-  tags               = { Name = "${local.resname}-task-exec" }
-}
-
-resource "aws_iam_role_policy_attachment" "task_exec_policy" {
-  role       = aws_iam_role.task_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-resource "aws_iam_role" "task_role" {
-  name               = "${local.resname}-task-role"
-  assume_role_policy = data.aws_iam_policy_document.task_exec_trust.json
-  tags               = { Name = "${local.resname}-task-role" }
-}
-
-resource "aws_iam_policy" "task_permissions" {
-  name = "${local.resname}-task-perms"
-
-  policy = jsonencode({
+########################################
+# IAM: execution role (pull image, push logs)
+########################################
+resource "aws_iam_role" "task_execution_role" {
+  name = "${local.name}-exec"
+  assume_role_policy = jsonencode({
     Version = "2012-10-17",
-    Statement = [
-      {
-        Sid    = "ReadParams",
-        Effect = "Allow",
-        Action = ["ssm:GetParameters","ssm:GetParameter","ssm:GetParametersByPath"],
-        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.me.account_id}:parameter${var.param_prefix}*"
-      },
-      {
-        Sid    = "DecryptIfSecure",
-        Effect = "Allow",
-        Action = ["kms:Decrypt"],
-        Resource = "*"
-      },
-      {
-        Sid    = "S3WriteCsv",
-        Effect = "Allow",
-        Action = ["s3:GetObject","s3:PutObject","s3:AbortMultipartUpload"],
-        Resource = [
-          "arn:aws:s3:::${var.csv_bucket}",
-          "arn:aws:s3:::${var.csv_bucket}/*"
-        ]
-      }
-    ]
+    Statement = [{
+      Effect = "Allow",
+      Principal = { Service = "ecs-tasks.amazonaws.com" },
+      Action = "sts:AssumeRole"
+    }]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "task_role_attach" {
+resource "aws_iam_role_policy_attachment" "task_exec_attach" {
+  role       = aws_iam_role.task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+########################################
+# IAM: task role (S3 + SSM + optional KMS)
+########################################
+resource "aws_iam_role" "task_role" {
+  name = "${local.name}-task"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect = "Allow",
+      Principal = { Service = "ecs-tasks.amazonaws.com" },
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_policy_document" "task_s3_ssm" {
+  statement {
+    sid     = "S3ObjectsIO"
+    actions = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:HeadObject"]
+    resources = [
+      "arn:aws:s3:::${var.s3_bucket}/input/*",
+      "arn:aws:s3:::${var.s3_bucket}/output/*",
+    ]
+  }
+
+  statement {
+    sid       = "S3ListLimited"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.s3_bucket}"]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["input/*", "output/*"]
+    }
+  }
+
+  statement {
+    sid     = "SSMRead"
+    actions = ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"]
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.ssm_param_prefix}*"
+    ]
+  }
+
+  dynamic "statement" {
+    for_each = compact([var.ssm_kms_key_arn, var.s3_kms_key_arn])
+    content {
+      sid       = "KmsDecrypt${replace(statement.value, ":", "")}"
+      actions   = ["kms:Decrypt"]
+      resources = [statement.value]
+    }
+  }
+}
+
+resource "aws_iam_policy" "task_s3_ssm" {
+  name   = "${local.name}-task-s3-ssm"
+  policy = data.aws_iam_policy_document.task_s3_ssm.json
+}
+
+resource "aws_iam_role_policy_attachment" "task_s3_ssm_attach" {
   role       = aws_iam_role.task_role.name
-  policy_arn = aws_iam_policy.task_permissions.arn
+  policy_arn = aws_iam_policy.task_s3_ssm.arn
 }
 
-# -------------------------
-# CloudWatch Logs
-# -------------------------
-resource "aws_cloudwatch_log_group" "app" {
-  name              = "/ecs/${local.resname}"
-  retention_in_days = 14
-  tags              = { Name = "/ecs/${local.resname}" }
-}
-
-# -------------------------
-# ECS Cluster, Task & Service
-# -------------------------
+########################################
+# ECS Cluster
+########################################
 resource "aws_ecs_cluster" "this" {
-  name = "${local.resname}-cluster"
-  tags = { Name = "${local.resname}-cluster" }
+  name = "${local.name}-cluster"
 }
 
+########################################
+# Task Definition
+########################################
 resource "aws_ecs_task_definition" "app" {
-  family                   = local.resname
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = tostring(var.cpu)
-  memory                   = tostring(var.memory)
+  family                   = "${local.name}"
   network_mode             = "awsvpc"
-  execution_role_arn       = aws_iam_role.task_execution.arn
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.task_execution_role.arn
   task_role_arn            = aws_iam_role.task_role.arn
 
   container_definitions = jsonencode([
     {
-      name      = "app",
-      image     = var.image_uri,
-      essential = true,
+      name      = local.name
+      image     = var.image_uri
+      essential = true
       portMappings = [
-        { containerPort = var.container_port, hostPort = var.container_port, protocol = "tcp" }
-      ],
+        { containerPort = 8080, hostPort = 8080, protocol = "tcp" }
+      ]
       environment = [
-        { name = "APP_PARAM_PREFIX", value = var.param_prefix },
-        { name = "APP_S3_BUCKET",    value = var.csv_bucket },
-        { name = "APP_S3_KEY",       value = var.csv_key }
-      ],
+        { name = "AWS_REGION",       value = var.aws_region },
+        { name = "APP_PARAM_PREFIX", value = var.ssm_param_prefix }
+      ]
       logConfiguration = {
         logDriver = "awslogs",
         options = {
           awslogs-group         = aws_cloudwatch_log_group.app.name,
           awslogs-region        = var.aws_region,
-          awslogs-stream-prefix = "ecs"
+          awslogs-stream-prefix = local.name
         }
       }
     }
   ])
-
-  tags = { Name = local.resname }
 }
 
+########################################
+# ECS Service
+########################################
 resource "aws_ecs_service" "app" {
-  name            = var.service_name
+  name            = local.name
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.app.arn
   desired_count   = var.desired_count
@@ -314,16 +322,56 @@ resource "aws_ecs_service" "app" {
 
   network_configuration {
     subnets          = [aws_subnet.public_a.id, aws_subnet.public_b.id]
-    security_groups  = [aws_security_group.task.id]
+    security_groups  = [aws_security_group.ecs_service.id]
     assign_public_ip = true
   }
 
   load_balancer {
     target_group_arn = aws_lb_target_group.app.arn
-    container_name   = "app"
-    container_port   = var.container_port
+    container_name   = local.name
+    container_port   = 8080
   }
 
   depends_on = [aws_lb_listener.http]
-  tags       = { Name = var.service_name }
 }
+
+########################################
+# Optional: Restrictive S3 bucket policy
+########################################
+data "aws_iam_policy_document" "bucket_policy" {
+  statement {
+    sid = "AllowTaskRoleObjectIO"
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.task_role.arn]
+    }
+    actions = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:HeadObject"]
+    resources = [
+      "arn:aws:s3:::${var.s3_bucket}/input/*",
+      "arn:aws:s3:::${var.s3_bucket}/output/*",
+    ]
+  }
+
+  statement {
+    sid = "AllowTaskRoleListLimited"
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_role.task_role.arn]
+    }
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.s3_bucket}"]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["input/*", "output/*"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "restrict_to_task_role" {
+  count  = var.attach_bucket_policy ? 1 : 0
+  bucket = var.s3_bucket
+  policy = data.aws_iam_policy_document.bucket_policy.json
+}
+
+
