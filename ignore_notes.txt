@@ -1,0 +1,48 @@
+mvn -q -DskipTests clean package
+
+
+docker build -t auth0-cleanup-sb:local .
+
+docker run --rm -p 8080:8080 `
+  -e AWS_REGION=us-east-1 `
+  -e APP_PARAM_PREFIX="/auth0-cleanup-sb/" `
+  -e AWS_PROFILE=default -e AWS_SDK_LOAD_CONFIG=1 `
+  -v "$HOME\.aws:/root/.aws:ro" `
+  auth0-cleanup-sb:local
+
+
+
+*********************
+DOCKER BUILD - using powershell
+*********************
+
+# From your app folder (where the Dockerfile or pom.xml lives)
+
+# Option A: Dockerfile
+docker build -t auth0-cleanup-sb:local .
+
+$env:AWS_REGION = "us-east-1"
+$env:APP_PARAM_PREFIX = "/auth0-cleanup-sb/"
+
+docker run --rm -p 8080:8080 `
+  -e AWS_REGION=$env:AWS_REGION `
+  -e APP_PARAM_PREFIX=$env:APP_PARAM_PREFIX `
+  -e AWS_PROFILE="default" `
+  -e AWS_SDK_LOAD_CONFIG=1 `
+  -v "$HOME\.aws:/root/.aws:ro" `
+  auth0-cleanup-sb:local
+
+
+Invoke:
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/batch/run?dryRun=true" | Format-List
+
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/batch/run" | Format-List
+
+
+
+2025-08-29T17:40:07.272Z  INFO 1 --- [nio-8080-exec-1] c.e.a.batch.io.S3CsvUserReader           : Opening S3 CSV s3://auth0-deleted-users/input/users_to_delete.csv
+2025-08-29T17:40:07.643Z ERROR 1 --- [nio-8080-exec-1] o.s.batch.core.step.AbstractStep         : Encountered an error executing step deleteUsersStep in job deleteUsersJob
+
+software.amazon.awssdk.core.exception.SdkClientException: Unable to marshall request to JSON: Bucket cannot be empty.
+        at software.amazon.awssdk.core.exception.SdkClientException$BuilderImpl.build(SdkClientException.java:111) ~[sdk-core-2.25.0.jar!/:na]
+        at software.amazon.awssdk.services.s3.transform.HeadObjectRequestMarshaller.marshall(HeadObjectRequestMarshaller.java:53) ~[s3-2.25.0.jar!/:na]

@@ -1,7 +1,9 @@
+// app/src/main/java/com/example/auth0cleanupsb/config/ParameterStoreLoader.java
 package com.example.auth0cleanupsb.config;
 
 import jakarta.annotation.PostConstruct;
-import org.slf4j.Logger; import org.slf4j.LoggerFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -9,9 +11,8 @@ import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.GetParametersByPathRequest;
 import software.amazon.awssdk.services.ssm.model.Parameter;
 
-import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 @Component
 public class ParameterStoreLoader {
@@ -24,55 +25,96 @@ public class ParameterStoreLoader {
 
   @PostConstruct
   public void load() {
-    // Only call SSM if required fields are missing in config/env.
-    boolean need = isBlank(props.getAuth0().getDomain()) ||
-                   isBlank(props.getAuth0().getClientId()) ||
-                   isBlank(props.getAuth0().getClientSecret()) ||
-                   isBlank(props.getS3().getBucket());
+    String prefix = normalize(props.getParamPrefix());
+    if (prefix == null) {
+      log.info("APP_PARAM_PREFIX not set; skipping SSM load.");
+      return;
+    }
 
-    if (!need) return;
-
-    String prefix = props.getParamPrefix();
-    if (!prefix.startsWith("/")) prefix = "/" + prefix;
-    if (!prefix.endsWith("/")) prefix = prefix + "/";
-
+    String regionEnv = System.getenv().getOrDefault("AWS_REGION", "us-east-1");
+    Region region = Region.of(regionEnv);
     try (SsmClient ssm = SsmClient.builder()
-        .region(Region.of(System.getenv().getOrDefault("AWS_REGION","us-east-1")))
+        .region(region)
         .credentialsProvider(DefaultCredentialsProvider.create())
         .build()) {
 
+      Map<String,String> kv = new HashMap<>();
       String nextToken = null;
-      Map<String,String> map = new java.util.HashMap<>();
       do {
         var req = GetParametersByPathRequest.builder()
-            .path(prefix).withDecryption(true).recursive(false).nextToken(nextToken).build();
+            .path(prefix)
+            .recursive(true)
+            .withDecryption(true)
+            .nextToken(nextToken)
+            .build();
         var resp = ssm.getParametersByPath(req);
         for (Parameter p : resp.parameters()) {
-          String key = p.name().substring(p.name().lastIndexOf('/') + 1);
-          map.put(key, p.value());
+          String name = p.name().substring(prefix.length()); // strip the prefix
+          kv.put(name, p.value());
         }
         nextToken = resp.nextToken();
-      } while (nextToken != null);
+      } while (nextToken != null && !nextToken.isBlank());
 
-      // Fill in missing values
-      if (isBlank(props.getAuth0().getDomain()))   props.getAuth0().setDomain(map.getOrDefault("AUTH0_DOMAIN",""));
-      if (isBlank(props.getAuth0().getAudience())) props.getAuth0().setAudience(map.getOrDefault("AUTH0_AUDIENCE",""));
-      if (isBlank(props.getAuth0().getClientId())) props.getAuth0().setClientId(map.getOrDefault("AUTH0_CLIENT_ID",""));
-      if (isBlank(props.getAuth0().getClientSecret())) props.getAuth0().setClientSecret(map.getOrDefault("AUTH0_CLIENT_SECRET",""));
-      if (isBlank(props.getS3().getBucket()))      props.getS3().setBucket(map.getOrDefault("S3_BUCKET",""));
-      if (isBlank(props.getS3().getKey()))         props.getS3().setKey(map.getOrDefault("S3_KEY","output/deleted_users.csv"));
+      // Merge into props IF blank (env vars still win)
+      setIfBlank(() -> props.getAuth0Domain(),       props::setAuth0Domain,       kv.get("AUTH0_DOMAIN"));
+      setIfBlank(() -> props.getAuth0Audience(),     props::setAuth0Audience,     kv.get("AUTH0_AUDIENCE"));
 
-      log.info("Loaded SSM params: {}", map.keySet().stream().collect(Collectors.joining(",")));
+      // support both CLIENT_ID vs CLIENTID
+      String clientId = firstNonBlank(kv.get("AUTH0_CLIENT_ID"), kv.get("AUTH0_CLIENTID"));
+      setIfBlank(() -> props.getAuth0ClientId(),     props::setAuth0ClientId,     clientId);
+
+      // support both CLIENT_SECRET vs CLIENTSECRET
+      String clientSecret = firstNonBlank(kv.get("AUTH0_CLIENT_SECRET"), kv.get("AUTH0_CLIENTSECRET"));
+      setIfBlank(() -> props.getAuth0ClientSecret(), props::setAuth0ClientSecret, clientSecret);
+
+      setIfBlank(() -> props.getS3Bucket(),          props::setS3Bucket,          kv.get("S3_BUCKET"));
+      setIfBlank(() -> props.getInputS3Key(),        props::setInputS3Key,        kv.get("INPUT_S3_KEY"));
+      // support both S3_KEY and OUTPUT_S3_KEY
+      String outKey = firstNonBlank(kv.get("S3_KEY"), kv.get("OUTPUT_S3_KEY"));
+      setIfBlank(() -> props.getOutputS3Key(),       props::setOutputS3Key,       outKey);
+
+      log.info("SSM loaded from prefix '{}': domain='{}', audience='{}', clientId='{}', s3Bucket='{}', inputKey='{}', outputKey='{}'",
+          prefix,
+          nz(props.getAuth0Domain()),
+          nz(props.getAuth0Audience()),
+          tailMask(props.getAuth0ClientId()),
+          nz(props.getS3Bucket()),
+          nz(props.getInputS3Key()),
+          nz(props.getOutputS3Key())
+      );
+
     } catch (Exception e) {
-      log.warn("Parameter Store load skipped/failed: {}", e.getMessage());
-    }
-
-    // Derive audience from domain if still missing
-    if (isBlank(props.getAuth0().getAudience()) && !isBlank(props.getAuth0().getDomain())) {
-      props.getAuth0().setAudience("https://" + stripProtocol(props.getAuth0().getDomain()) + "/api/v2/");
+      log.error("Failed to load parameters from SSM prefix '{}': {}", prefix, e.toString());
     }
   }
 
-  private static boolean isBlank(String s) { return s == null || s.isBlank(); }
-  private static String stripProtocol(String d){ return d.replaceFirst("^https?://","").replaceAll("/+$",""); }
+  private static String normalize(String pfx) {
+    if (pfx == null || pfx.isBlank()) return null;
+    String s = pfx.trim();
+    if (!s.startsWith("/")) s = "/" + s;
+    if (!s.endsWith("/")) s = s + "/";
+    return s;
+  }
+
+  private static void setIfBlank(SupplierLike getter, Setter setter, String value) {
+    if (value == null || value.isBlank()) return;
+    String cur = getter.get();
+    if (cur == null || cur.isBlank()) setter.set(value);
+  }
+
+  private static String firstNonBlank(String a, String b) {
+    if (a != null && !a.isBlank()) return a;
+    if (b != null && !b.isBlank()) return b;
+    return null;
+  }
+
+  private static String nz(String s) { return (s == null || s.isBlank()) ? "<blank>" : s; }
+  private static String tailMask(String s) {
+    if (s == null || s.isBlank()) return "<blank>";
+    int keep = Math.min(4, s.length());
+    return "****" + s.substring(s.length() - keep);
+  }
+
+  @FunctionalInterface private interface SupplierLike { String get(); }
+  @FunctionalInterface private interface Setter { void set(String v); }
 }

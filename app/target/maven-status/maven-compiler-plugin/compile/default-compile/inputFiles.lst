@@ -1,7 +1,16 @@
 C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\auth0\Auth0Client.java
 C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\Auth0CleanupSbApplication.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\batch\io\S3CsvResultWriter.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\batch\io\S3CsvUserReader.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\batch\JobConfig.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\batch\model\DeleteResult.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\batch\model\UserDeleteRecord.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\batch\processor\Auth0DeleteProcessor.java
 C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\config\AppProperties.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\config\AwsClientsConfig.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\config\ConfigDiagnostics.java
 C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\config\ParameterStoreLoader.java
 C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\s3\S3CsvWriter.java
 C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\service\CleanupService.java
+C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\web\BatchController.java
 C:\DevSandbox\GitHub\auth0_cleanup_sb\app\src\main\java\com\example\auth0cleanupsb\web\UserController.java

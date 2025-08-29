@@ -2,102 +2,113 @@ package com.example.auth0cleanupsb.service;
 
 import com.example.auth0cleanupsb.auth0.Auth0Client;
 import com.example.auth0cleanupsb.config.AppProperties;
-import com.example.auth0cleanupsb.s3.S3CsvWriter;
-import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Service;
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
-import java.time.Instant;
-import java.util.*;
+import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Service
 public class CleanupService {
-  private final AppProperties props;
   private final Auth0Client auth0;
-  private final S3CsvWriter s3;
+  private final S3Client s3;
+  private final AppProperties props;
 
-  public CleanupService(AppProperties props, Auth0Client auth0, S3CsvWriter s3) {
-    this.props = props; this.auth0 = auth0; this.s3 = s3;
+  public CleanupService(Auth0Client auth0, S3Client s3, AppProperties props) {
+    this.auth0 = auth0;
+    this.s3 = s3;
+    this.props = props;
   }
 
-  public Map<String,Object> deleteBySsoid(String ssoid, boolean dryRun, String deletedBy) throws Exception {
-    var a = props.getAuth0();
-    String audience = (a.getAudience()==null||a.getAudience().isBlank())
-        ? "https://" + strip(a.getDomain()) + "/api/v2/"
-        : a.getAudience();
+  /** Back-compat: controller that doesn't pass email can use this. */
+  public Map<String, Object> deleteBySsoid(String ssoid, boolean dryRun) throws Exception {
+    return deleteBySsoid(ssoid, dryRun, "");
+  }
 
-    String token = auth0.getMgmtToken(a.getDomain(), a.getClientId(), a.getClientSecret(), audience);
+  /** Preferred: include email so it lands in the CSV output. */
+  public Map<String, Object> deleteBySsoid(String ssoid, boolean dryRun, String email) throws Exception {
+    String ts = OffsetDateTime.now().toString();
+    String status;
+    String userId = null;
+    String err = null;
 
-    List<JsonNode> users = auth0.searchUsers(a.getDomain(), token, "identities.user_id:\""+ssoid+"\"");
-    if (users.isEmpty()) {
-      users = auth0.searchUsers(a.getDomain(), token, "app_metadata.ssoid:\""+ssoid+"\"");
-    }
-    if (users.isEmpty()) {
-      return Map.of("message","Cannot find user", "ssoid", ssoid, "results", List.of());
-    }
-
-    List<Map<String,Object>> results = new ArrayList<>();
-    StringBuilder csv = new StringBuilder();
-    String now = Instant.now().toString();
-
-    for (JsonNode u : users) {
-      String userId = opt(u,"user_id");
-      if (!dryRun) {
-        auth0.deleteUser(a.getDomain(), token, userId);
+    try {
+      userId = auth0.findUserIdBySsoid(ssoid);
+      if (userId == null || userId.isBlank()) {
+        status = "NOT_FOUND";
+        appendCsv(ssoid, email, null, status, "N", ts, null);
+        return resp(ssoid, status, userId, null);
       }
+      if (dryRun) {
+        status = "DRY_RUN";
+      } else {
+        auth0.deleteUserById(userId);
+        status = "DELETED";
+      }
+      appendCsv(ssoid, email, userId, status, "Y", ts, null);
+      return resp(ssoid, status, userId, null);
+    } catch (Exception e) {
+      err = e.getMessage();
+      status = "ERROR";
+      appendCsv(ssoid, email, userId, status, "N", ts, err);
+      throw e;
+    }
+  }
 
-      results.add(Map.of("user_id", userId, "deleted", !dryRun));
-      csv.append(buildCsvRow(ssoid, now, u, deletedBy));
+  private Map<String, Object> resp(String ssoid, String status, String userId, String error) {
+    Map<String, Object> m = new LinkedHashMap<>();
+    m.put("ssoid", ssoid);
+    m.put("status", status);
+    m.put("auth0_user_id", userId);
+    if (error != null) m.put("error", error);
+    return m;
+  }
+
+  private void appendCsv(String ssoid, String email, String userId, String status,
+                         String deactFlag, String ts, String error) {
+    String bucket = props.getS3Bucket();
+    String key = props.getOutputS3Key();
+
+    StringBuilder sb = new StringBuilder();
+    sb.append(csv(ssoid)).append(',')
+      .append(csv(email)).append(',')
+      .append(csv(userId)).append(',')
+      .append(csv(status)).append(',')
+      .append(csv(deactFlag)).append(',')
+      .append(csv(ts)).append(',')
+      .append(csv(error)).append('\n');
+
+    byte[] newChunk = sb.toString().getBytes(StandardCharsets.UTF_8);
+    byte[] base = new byte[0];
+    try {
+      ResponseBytes<GetObjectResponse> existing =
+          s3.getObjectAsBytes(GetObjectRequest.builder().bucket(bucket).key(key).build());
+      base = existing.asByteArray();
+    } catch (S3Exception ignored) {
+      // object may not exist yet
     }
 
-    if (!dryRun && props.getS3().getBucket()!=null && !props.getS3().getBucket().isBlank()) {
-      s3.appendRows(props.getS3().getBucket(), props.getS3().getKey(), csv.toString());
+    byte[] merged = new byte[base.length + newChunk.length];
+    System.arraycopy(base, 0, merged, 0, base.length);
+    System.arraycopy(newChunk, 0, merged, base.length, newChunk.length);
+
+    s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
+        RequestBody.fromBytes(merged));
+  }
+
+  private static String csv(String v) {
+    if (v == null) return "";
+    if (v.contains(",") || v.contains("\"") || v.contains("\n")) {
+      return "\"" + v.replace("\"", "\"\"") + "\"";
     }
-
-    return Map.of("message", dryRun? "Dry run complete":"Delete attempt complete",
-                  "ssoid", ssoid,
-                  "count", results.size(),
-                  "results", results);
-  }
-
-  private static String buildCsvRow(String ssoid, String ts, JsonNode u, String deletedBy) {
-    String providers = joinArray(u.path("identities"), "provider");
-    String connections = joinArray(u.path("identities"), "connection");
-    String row = String.join(",",
-        csv(ssoid),
-        csv("Y"),
-        csv(ts),
-        csv(opt(u,"user_id")),
-        csv(opt(u,"email")),
-        csv(firstNonBlank(opt(u,"name"), opt(u,"nickname"), opt(u,"username"))),
-        csv(providers),
-        csv(connections),
-        csv(opt(u,"created_at")),
-        csv(opt(u,"last_login")),
-        csvNum(u.path("logins_count").asText(null)),
-        csv(deletedBy)
-    );
-    return row + "\n";
-  }
-
-  private static String joinArray(JsonNode arr, String field){
-    if (!arr.isArray()) return "";
-    List<String> list = new ArrayList<>();
-    for (JsonNode n: arr) list.add(opt(n, field));
-    return String.join(";", list.stream().filter(s -> !s.isBlank()).toList());
-  }
-
-  private static String opt(JsonNode n, String field){
-    return n.hasNonNull(field) ? n.get(field).asText() : "";
-  }
-  private static String firstNonBlank(String... v){
-    for (String s: v) if (s!=null && !s.isBlank()) return s; return "";
-  }
-  private static String csv(String v){
-    if (v==null) v="";
-    if (v.contains(",") || v.contains("\"") || v.contains("\n"))
-      return "\"" + v.replace("\"","\"\"") + "\"";
     return v;
   }
-  private static String csvNum(String v){ return (v!=null && v.matches("\\d+")) ? v : ""; }
-  private static String strip(String d){ return d.replaceFirst("^https?://","").replaceAll("/+$",""); }
 }
