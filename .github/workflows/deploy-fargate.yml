@@ -101,6 +101,59 @@ jobs:
             echo "No preexisting log group; Terraform will create $LOG_GROUP"
           fi
 
+
+      - name: Pre-clean IAM policy (delete if exists)
+        env:
+          TF_DIR: ${{ env.TF_DIR }}                 # e.g., infra/terraform/envs/dev
+          POLICY_NAME: ${{ env.PROJECT_NAME }}-task-s3-ssm   # must match the 'name' in aws_iam_policy
+        run: |
+          set -euo pipefail
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${POLICY_NAME}"
+
+          # If it's already in Terraform state, let Terraform manage it
+          if terraform -chdir="${TF_DIR}" state show aws_iam_policy.task_s3_ssm >/dev/null 2>&1; then
+            echo "Policy already tracked in Terraform state; skipping pre-clean."
+            exit 0
+          fi
+
+          # If it doesn't exist in AWS, nothing to delete
+          if ! aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
+            echo "No preexisting policy: $POLICY_ARN"
+            exit 0
+          fi
+
+          echo "Found existing policy: $POLICY_ARN — detaching and deleting."
+
+          # Detach from roles
+          ROLES=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" --query 'PolicyRoles[].RoleName' --output text || true)
+          if [ -n "$ROLES" ]; then
+            for R in $ROLES; do aws iam detach-role-policy --role-name "$R" --policy-arn "$POLICY_ARN"; done
+          fi
+
+          # Detach from users
+          USERS=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" --query 'PolicyUsers[].UserName' --output text || true)
+          if [ -n "$USERS" ]; then
+            for U in $USERS; do aws iam detach-user-policy --user-name "$U" --policy-arn "$POLICY_ARN"; done
+          fi
+
+          # Detach from groups
+          GROUPS=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" --query 'PolicyGroups[].GroupName' --output text || true)
+          if [ -n "$GROUPS" ]; then
+            for G in $GROUPS; do aws iam detach-group-policy --group-name "$G" --policy-arn "$POLICY_ARN"; done
+          fi
+
+          # Delete all non-default versions
+          VERS=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" \
+                  --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text || true)
+          for V in $VERS; do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$V"; done
+
+          # Delete the policy
+          aws iam delete-policy --policy-arn "$POLICY_ARN"
+          echo "Deleted $POLICY_ARN; Terraform will recreate it."
+
+
       - name: Terraform Plan
         env:
           # pass both TF_VAR_* and -var to be 100% non-interactive
