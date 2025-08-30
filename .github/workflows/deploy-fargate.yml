@@ -9,10 +9,13 @@ permissions:
   id-token: write
   contents: read
 
+# at top-level env: keep these consistent with your Terraform
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: auth0-cleanup-sb
-  TF_DIR: infra/terraform/envs/dev   # <— your folder with main.tf
+  TF_DIR: infra/terraform/envs/dev
+  PROJECT_NAME: auth0-cleanup-sb   # must match local.name / var.project_name in Terraform
+
 
 jobs:
   build-and-deploy:
@@ -71,6 +74,33 @@ jobs:
       - name: Terraform Init
         run: terraform -chdir="${{ env.TF_DIR }}" init -input=false
 
+      # NEW: import-if-exists step
+      - name: Import existing CloudWatch log group if present
+        env:
+          TF_DIR: ${{ env.TF_DIR }}
+          LOG_GROUP: /ecs/${{ env.PROJECT_NAME }}   # /ecs/${local.name}
+        run: |
+          set -euo pipefail
+
+          # If already in state, nothing to do
+          if terraform -chdir="${TF_DIR}" state show aws_cloudwatch_log_group.app >/dev/null 2>&1; then
+            echo "Log group is already in Terraform state."
+            exit 0
+          fi
+
+          # Check if it exists in AWS
+          EXISTS=$(aws logs describe-log-groups \
+            --log-group-name-prefix "$LOG_GROUP" \
+            --query 'logGroups[?logGroupName==`'"$LOG_GROUP"'`].logGroupName' \
+            --output text || true)
+                       if [ "$EXISTS" = "$LOG_GROUP" ]; then
+            echo "Importing existing log group: $LOG_GROUP"
+            terraform -chdir="${TF_DIR}" import aws_cloudwatch_log_group.app "$LOG_GROUP"
+          else
+            echo "No preexisting log group; Terraform will create $LOG_GROUP"
+          fi
+
+
       - name: Terraform Plan
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -88,3 +118,4 @@ jobs:
             -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
             -var="s3_bucket=${{ vars.S3_BUCKET }}" \
             -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
+

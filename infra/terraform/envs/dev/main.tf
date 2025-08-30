@@ -172,9 +172,16 @@ resource "aws_lb_listener" "http" {
 # CloudWatch Logs for ECS
 ########################################
 resource "aws_cloudwatch_log_group" "app" {
-  name              = "/ecs/${local.name}"
+  name              = "/ecs/${local.name}"  # e.g., /ecs/auth0-cleanup-sb
   retention_in_days = 14
+
+  lifecycle {
+    prevent_destroy = true   # avoids accidental deletion
+  }
+
+  tags = { Name = "${local.name}-logs" }
 }
+
 
 ########################################
 # IAM: execution role (pull image, push logs)
