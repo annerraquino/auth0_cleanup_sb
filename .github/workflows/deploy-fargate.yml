@@ -9,13 +9,11 @@ permissions:
   id-token: write
   contents: read
 
-# at top-level env: keep these consistent with your Terraform
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: auth0-cleanup-sb
   TF_DIR: infra/terraform/envs/dev
-  PROJECT_NAME: auth0-cleanup-sb   # must match local.name / var.project_name in Terraform
-
+  PROJECT_NAME: auth0-cleanup-sb     # must match local.name / var.project_name in TF
 
 jobs:
   build-and-deploy:
@@ -31,11 +29,11 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}   # set in repo Settings → Variables
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions
 
-      - name: Set up Java (JDK 21)
+      - name: Setup Java (JDK 21)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -59,7 +57,7 @@ jobs:
           docker build -t "$IMAGE_URI" ./app
           docker push "$IMAGE_URI"
 
-      - name: Debug Terraform directory
+      - name: Debug TF dir & files
         run: |
           echo "TF_DIR=${{ env.TF_DIR }}"
           ls -la "${{ env.TF_DIR }}"
@@ -72,50 +70,57 @@ jobs:
           terraform_version: 1.8.5
 
       - name: Terraform Init
-        run: terraform -chdir="${{ env.TF_DIR }}" init -input=false
+        env:
+          TF_VAR_image_uri:        ${{ env.IMAGE_URI }}
+          TF_VAR_s3_bucket:        ${{ vars.S3_BUCKET }}
+          TF_VAR_ssm_param_prefix: ${{ vars.SSM_PARAM_PREFIX }}
+        run: terraform -chdir="${{ env.TF_DIR }}" init -input=false -no-color
 
-      # NEW: import-if-exists step
+      # Auto-import CW log group if it already exists
       - name: Import existing CloudWatch log group if present
         env:
-          TF_DIR: ${{ env.TF_DIR }}
-          LOG_GROUP: /ecs/${{ env.PROJECT_NAME }}   # /ecs/${local.name}
+          LOG_GROUP: /ecs/${{ env.PROJECT_NAME }}
         run: |
           set -euo pipefail
-
-          # If already in state, nothing to do
+          # Already in state?
           if terraform -chdir="${TF_DIR}" state show aws_cloudwatch_log_group.app >/dev/null 2>&1; then
-            echo "Log group is already in Terraform state."
+            echo "Log group already in Terraform state."
             exit 0
           fi
 
-          # Check if it exists in AWS
+          # Exists in AWS?
           EXISTS=$(aws logs describe-log-groups \
             --log-group-name-prefix "$LOG_GROUP" \
             --query 'logGroups[?logGroupName==`'"$LOG_GROUP"'`].logGroupName' \
             --output text || true)
-                       if [ "$EXISTS" = "$LOG_GROUP" ]; then
+
+          if [ "$EXISTS" = "$LOG_GROUP" ]; then
             echo "Importing existing log group: $LOG_GROUP"
             terraform -chdir="${TF_DIR}" import aws_cloudwatch_log_group.app "$LOG_GROUP"
           else
             echo "No preexisting log group; Terraform will create $LOG_GROUP"
           fi
 
-
       - name: Terraform Plan
         env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          # pass both TF_VAR_* and -var to be 100% non-interactive
+          TF_VAR_image_uri:        ${{ env.IMAGE_URI }}
+          TF_VAR_s3_bucket:        ${{ vars.S3_BUCKET }}
+          TF_VAR_ssm_param_prefix: ${{ vars.SSM_PARAM_PREFIX }}
+          ECR_REGISTRY:            ${{ steps.ecr-login.outputs.registry }}
         run: |
-          terraform -chdir="${{ env.TF_DIR }}" plan -input=false \
-            -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
+          terraform -chdir="${{ env.TF_DIR }}" plan -input=false -no-color \
+            -var="image_uri=${IMAGE_URI}" \
             -var="s3_bucket=${{ vars.S3_BUCKET }}" \
             -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
 
       - name: Terraform Apply
         env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          TF_VAR_image_uri:        ${{ env.IMAGE_URI }}
+          TF_VAR_s3_bucket:        ${{ vars.S3_BUCKET }}
+          TF_VAR_ssm_param_prefix: ${{ vars.SSM_PARAM_PREFIX }}
         run: |
-          terraform -chdir="${{ env.TF_DIR }}" apply -auto-approve -input=false \
-            -var="image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
+          terraform -chdir="${{ env.TF_DIR }}" apply -auto-approve -input=false -no-color \
+            -var="image_uri=${IMAGE_URI}" \
             -var="s3_bucket=${{ vars.S3_BUCKET }}" \
             -var="ssm_param_prefix=${{ vars.SSM_PARAM_PREFIX }}"
-
